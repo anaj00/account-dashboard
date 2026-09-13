@@ -1,4 +1,5 @@
 import crypto from "node:crypto"
+import { spawn } from "node:child_process"
 import fs from "node:fs"
 import fsp from "node:fs/promises"
 import os from "node:os"
@@ -231,6 +232,15 @@ function resetCountdown(window) {
   return `resets in ${minutes}m`
 }
 
+function resetCredits(snapshot) {
+  const credits = snapshot?.limits?.rate_limit_reset_credits ?? snapshot?.limits?.rate_limit?.rate_limit_reset_credits
+  if (!credits || typeof credits !== "object") return null
+  const total = credits.available_count
+  const applicable = credits.applicable_available_count
+  if (!Number.isFinite(total) && !Number.isFinite(applicable)) return null
+  return { total, applicable }
+}
+
 export function formatLimits(snapshot) {
   if (!snapshot) return ["Limits unavailable: Codex has not recorded a usable local snapshot yet."]
   const age = Math.max(0, Date.now() - snapshot.observedAt)
@@ -257,6 +267,12 @@ export function formatLimits(snapshot) {
     const detail = used === null ? "usage unknown" : `${Math.round(100 - used)}% left \u00b7 ${Math.round(used)}% used`
     lines.push(`${label.padEnd(12)} ${bar(used)} ${detail}${reset(window)}`)
   }
+  const credits = resetCredits(snapshot)
+  if (credits) {
+    const total = Number.isFinite(credits.total) ? `${credits.total} banked` : "banked count unavailable"
+    const applicable = Number.isFinite(credits.applicable) ? `${credits.applicable} usable now` : "usable count unavailable"
+    lines.push(`Reset credits ${total} · ${applicable}`)
+  }
   return lines
 }
 
@@ -273,6 +289,15 @@ function quotaWindows(snapshot) {
   const secondary = source.secondary_window ?? source.secondary
   if (primary) result.push([windowLabel("Primary", primary), primary])
   if (secondary) result.push([windowLabel("Secondary", secondary), secondary])
+  const additional = snapshot.limits?.additional_rate_limits ?? source.additional_rate_limits
+  if (Array.isArray(additional)) {
+    for (const item of additional) {
+      const name = item.display_name || item.name || item.limit_name || "Additional"
+      if (item.primary) result.push([`${name} ${windowLabel("primary", item.primary)}`, item.primary])
+      if (item.secondary) result.push([`${name} ${windowLabel("secondary", item.secondary)}`, item.secondary])
+      if (!item.primary && !item.secondary) result.push([name, item])
+    }
+  }
   return result
 }
 
@@ -295,6 +320,12 @@ function tuiQuotaLines(snapshot, width, selected) {
     }
     const countdown = resetCountdown(window)
     if (countdown) lines.push(`${" ".repeat(10)}${ansi("2", countdown)}`)
+  }
+  const credits = resetCredits(snapshot)
+  if (credits) {
+    const total = Number.isFinite(credits.total) ? `${credits.total} banked` : "banked count unavailable"
+    const applicable = Number.isFinite(credits.applicable) ? `${credits.applicable} usable now` : "usable count unavailable"
+    lines.push(ansi("2", `Reset credits: ${total} · ${applicable}`))
   }
   return lines
 }
@@ -363,13 +394,16 @@ function buildStackedDashboard(rows, selected, message, width, provider, tabs, s
     lines.push(`${marker} ${name}${active}`)
     if (provider === "codex") {
       if (row.loading) lines.push(`    ${ansi("2", "refreshing usage…")}`)
-      else if (row.error) lines.push(`    ${ansi("33", "Usage unavailable")}`)
+      else if (row.error) {
+        lines.push(`    ${ansi("33", "Usage unavailable")}`)
+        lines.push(`    ${ansi("2", clip(row.error, Math.max(20, width - 8)))}`)
+      }
       else for (const line of tuiQuotaLines(row.snapshot, width, isSelected)) lines.push(`    ${line}`)
     }
     else lines.push(`    ${ansi("2", row.active ? "currently selected in OpenCode" : "saved local profile")}`)
     lines.push("")
   }
-  lines.push(ansi("2", "←→ tabs   ↑↓ move   enter switch"), ansi("2", "r refresh  a add     d delete   q quit"))
+  lines.push(ansi("2", "←→ tabs   ↑↓ move   enter switch"), ansi("2", provider === "opencode" ? "o login    a save    d delete   q quit" : "r refresh  a add     d delete   q quit"))
   if (message) lines.push("", ansi("36", `  ${clip(message, width - 2)}`))
   return lines.join("\n")
 }
@@ -422,6 +456,24 @@ async function promptLine(question, stdin, stdout) {
   return answer.trim()
 }
 
+async function runOpenCodeLogin(stdin, stdout) {
+  stdin.setRawMode(false)
+  stdin.pause()
+  stdout.write("\x1b[?25h\x1b[?1049l")
+  try {
+    const command = process.platform === "win32" ? "opencode.cmd" : "opencode"
+    await new Promise((resolve, reject) => {
+      const child = spawn(command, ["auth", "login"], { stdio: "inherit" })
+      child.once("error", (error) => reject(error.code === "ENOENT" ? new Error("OpenCode is not installed or is not on PATH") : error))
+      child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`OpenCode login exited with code ${code}`)))
+    })
+  } finally {
+    stdout.write("\x1b[?1049h\x1b[?25l")
+    stdin.setRawMode(true)
+    stdin.resume()
+  }
+}
+
 export async function runTui(paths, fetchImpl = globalThis.fetch, stdin = process.stdin, stdout = process.stdout) {
   if (!stdin.isTTY || !stdout.isTTY) throw new Error("The terminal UI requires an interactive terminal")
   readline.emitKeypressEvents(stdin)
@@ -460,7 +512,14 @@ export async function runTui(paths, fetchImpl = globalThis.fetch, stdin = proces
           if (key.name === "tab" || key.name === "left" || key.name === "right") { busy = true; provider = provider === "codex" ? "opencode" : "codex"; selected = 0; message = ""; await load(); busy = false }
           else if (key.name === "up" || key.name === "k") selected = Math.max(0, selected - 1)
           else if (key.name === "down" || key.name === "j") selected = Math.min(rows.length - 1, selected + 1)
-          else if (key.name === "r") { busy = true; message = "Refreshing every saved account…"; draw(); await load(); message = "Usage refreshed."; busy = false }
+           else if (key.name === "r") { busy = true; message = "Refreshing every saved account…"; draw(); await load(); message = "Usage refreshed."; busy = false }
+          else if (key.name === "o" && provider === "opencode") {
+            busy = true
+            await runOpenCodeLogin(stdin, stdout)
+            message = "OpenCode login finished. Press A to save this login."
+            await load()
+            busy = false
+          }
           else if (key.name === "return" && rows[selected]) {
             busy = true
             const name = rows[selected].name

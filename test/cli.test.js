@@ -130,6 +130,7 @@ test("terminal dashboard renders accounts, state, bars, and controls", () => {
   assert(view.includes("75% left"))
   assert(view.includes("work"))
   assert(view.includes("Usage unavailable"))
+  assert(view.includes("login expired"))
   assert(view.includes("switch"))
   assert(!view.includes("access_token"))
 })
@@ -170,6 +171,43 @@ test("terminal dashboard shows quota reset countdown", () => {
   ])
   const plain = view.replace(/\x1b\[[0-9;]*m/g, "")
   assert.match(plain, /resets in (1h 59m|2h)/)
+})
+
+test("terminal dashboard shows every Codex rate limit", () => {
+  const view = buildDashboard([{
+    name: "personal",
+    active: true,
+    snapshot: {
+      observedAt: Date.now(),
+      limits: {
+        rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000 } },
+        additional_rate_limits: [{
+          display_name: "GPT-5.4",
+          primary: { used_percent: 50, window_minutes: 10080 },
+        }],
+      },
+    },
+  }])
+  const plain = view.replace(/\x1b\[[0-9;]*m/g, "")
+  assert(plain.includes("5-hour"))
+  assert(plain.includes("GPT-5.4 Weekly"))
+  assert(plain.includes("50% left"))
+})
+
+test("terminal dashboard shows banked reset credits", () => {
+  const view = buildDashboard([{
+    name: "personal",
+    active: true,
+    snapshot: {
+      observedAt: Date.now(),
+      limits: {
+        rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000 } },
+        rate_limit_reset_credits: { available_count: 3, applicable_available_count: 1 },
+      },
+    },
+  }])
+  const plain = view.replace(/\x1b\[[0-9;]*m/g, "")
+  assert(plain.includes("Reset credits: 3 banked · 1 usable now"))
 })
 
 test("terminal dashboard renders the separate OpenCode tab without quota claims", () => {

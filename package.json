@@ -6,7 +6,9 @@
   "type": "module",
   "bin": {
     "codex-account": "./bin/codex-account.js",
-    "account-dashboard": "./bin/codex-account.js"
+    "account-dashboard": "./bin/codex-account.js",
+    "account-dashboard-isolated": "./bin/account-dashboard-isolated.js",
+    "codex-isolated": "./bin/codex-isolated.js"
   },
   "scripts": { "test": "node --test" },
   "engines": { "node": ">=18" },
